@@ -1,0 +1,18 @@
+[
+  {
+    "targets": ["https://example.com"],
+    "labels": {
+      "client_name": "Client-A",
+      "service_name": "main-site",
+      "environment": "prod"
+    }
+  },
+  {
+    "targets": ["https://api.example.com/health"],
+    "labels": {
+      "client_name": "Client-A",
+      "service_name": "api-health",
+      "environment": "prod"
+    }
+  }
+]

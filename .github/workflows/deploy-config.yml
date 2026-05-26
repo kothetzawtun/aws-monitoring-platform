@@ -1,0 +1,179 @@
+name: Deploy Monitoring Config
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "config/**"
+      - ".github/workflows/deploy-config.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      INSTANCE_ID: ${{ vars.MONITORING_INSTANCE_ID }}
+      CONFIG_BUCKET: ${{ vars.MONITORING_CONFIG_BUCKET }}
+      MONITORING_ENVIRONMENT: ${{ vars.MONITORING_ENVIRONMENT }}
+      MONITORING_DOMAIN: ${{ vars.MONITORING_DOMAIN }}
+      CONFIG_KEY: monitoring-platform-aws/config.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Validate config locally
+        run: |
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/config/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:latest \
+            check config /etc/prometheus/prometheus.yml
+
+          docker run --rm \
+            --entrypoint amtool \
+            -v "$PWD/config/alertmanager:/etc/alertmanager:ro" \
+            prom/alertmanager:latest \
+            check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Write deploy script
+        run: |
+          cat > deploy.sh << 'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+
+          CONFIG_BUCKET="$1"
+          CONFIG_KEY="$2"
+          AWS_REGION="$3"
+          MONITORING_ENVIRONMENT="$4"
+          MONITORING_DOMAIN="$5"
+
+          mkdir -p /opt/monitoring /opt/ssl
+
+          echo "==> Download config from S3"
+          aws s3 cp "s3://${CONFIG_BUCKET}/${CONFIG_KEY}" /tmp/monitoring-config.zip \
+            --region "${AWS_REGION}"
+          unzip -o /tmp/monitoring-config.zip -d /opt/monitoring
+
+          echo "==> Get Grafana password from SSM"
+          GRAFANA_PASSWORD=$(aws ssm get-parameter \
+            --region "${AWS_REGION}" \
+            --name "/monitoring/${MONITORING_ENVIRONMENT}/grafana/password" \
+            --with-decryption \
+            --query "Parameter.Value" \
+            --output text)
+
+          echo "==> Write .env file"
+          echo "DOMAIN_NAME=${MONITORING_DOMAIN}" > /opt/monitoring/.env
+          echo "GRAFANA_ADMIN_PASSWORD=${GRAFANA_PASSWORD}" >> /opt/monitoring/.env
+
+          echo "==> Check SSL certificate"
+          if [ ! -s /opt/ssl/fullchain.crt ] || [ ! -s /opt/ssl/privatekey.pem ]; then
+            openssl req -x509 -nodes -days 1 -newkey rsa:2048 \
+              -keyout /opt/ssl/privatekey.pem \
+              -out /opt/ssl/fullchain.crt \
+              -subj "/CN=${MONITORING_DOMAIN}"
+            chmod 644 /opt/ssl/fullchain.crt
+            chmod 600 /opt/ssl/privatekey.pem
+          fi
+
+          echo "==> Validate configs before apply"
+          docker run --rm \
+            -v /opt/monitoring/config/prometheus:/etc/prometheus:ro \
+            --entrypoint promtool \
+            prom/prometheus:latest \
+            check config /etc/prometheus/prometheus.yml
+
+          docker run --rm \
+            -v /opt/monitoring/config/alertmanager:/etc/alertmanager:ro \
+            --entrypoint amtool \
+            prom/alertmanager:latest \
+            check-config /etc/alertmanager/alertmanager.yml
+
+          echo "==> Fix data directory permissions"
+          mkdir -p /data/grafana /data/prometheus /data/alertmanager
+
+          chown -R 472:472 /data/grafana
+          chmod 750 /data/grafana
+
+          chown -R 65534:65534 /data/prometheus
+          chmod 750 /data/prometheus
+
+          chown -R 65534:65534 /data/alertmanager
+          chmod 750 /data/alertmanager
+
+          echo "==> Start stack"
+          cd /opt/monitoring
+          docker compose -f config/docker-compose.yml --env-file /opt/monitoring/.env up -d
+
+          echo "==> Wait for Nginx container"
+          NGINX_READY=false
+          for i in {1..10}; do
+            if [ "$(docker inspect -f '{{.State.Running}}' nginx 2>/dev/null)" = "true" ]; then
+              NGINX_READY=true
+              break
+            fi
+            echo "Waiting for Nginx... ($i/10)"
+            sleep 2
+          done
+
+          if [ "$NGINX_READY" != "true" ]; then
+            echo "ERROR: Nginx container failed to start"
+            docker compose -f config/docker-compose.yml --env-file /opt/monitoring/.env logs nginx
+            exit 1
+          fi
+
+          echo "==> Check Nginx is running"
+          docker inspect -f '{{.State.Running}}' nginx
+
+          echo "==> Deployment complete"
+          SCRIPT
+          chmod +x deploy.sh
+
+      - name: Upload deploy script to S3
+        run: |
+          aws s3 cp deploy.sh \
+            "s3://${CONFIG_BUCKET}/monitoring-platform-aws/deploy.sh"
+
+      - name: Package and upload config
+        run: |
+          zip -r config.zip config
+          aws s3 cp config.zip "s3://${CONFIG_BUCKET}/${CONFIG_KEY}"
+
+      - name: Deploy via SSM
+        run: |
+          SSM_COMMAND="aws s3 cp s3://${CONFIG_BUCKET}/monitoring-platform-aws/deploy.sh /tmp/deploy.sh --region ${AWS_REGION} && chmod +x /tmp/deploy.sh && /tmp/deploy.sh '${CONFIG_BUCKET}' '${CONFIG_KEY}' '${AWS_REGION}' '${MONITORING_ENVIRONMENT}' '${MONITORING_DOMAIN}'"
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy monitoring config" \
+            --timeout-seconds 1800 \
+            --parameters "commands=[\"$SSM_COMMAND\"]" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "Command ID: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}"

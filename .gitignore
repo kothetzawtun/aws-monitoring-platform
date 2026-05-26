@@ -1,0 +1,21 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+!terraform.tfvars.example
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.csr
+ssl/
+
+# Prometheus targets (contain real IPs and domains)
+config/prometheus/targets/servers.json
+config/prometheus/targets/websites.json
+
+# OS
+.DS_Store

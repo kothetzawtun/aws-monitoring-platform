@@ -1,0 +1,67 @@
+groups:
+  - name: infrastructure
+    rules:
+      - alert: InstanceDown
+        expr: up{job="node_exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance {{ $labels.instance }} is down"
+          description: "{{ $labels.client_name }} / {{ $labels.server_name }} has been unreachable for 2 minutes."
+
+      - alert: InstanceHighCPU
+        expr: 100 - (avg by(instance, client_name, server_name, environment)(rate(node_cpu_seconds_total{job="node_exporter",mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% on {{ $labels.client_name }} / {{ $labels.server_name }}."
+
+      - alert: InstanceHighMemory
+        expr: avg by(instance, client_name, server_name, environment)((1 - (node_memory_MemAvailable_bytes{job="node_exporter"} / node_memory_MemTotal_bytes{job="node_exporter"})) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}% on {{ $labels.client_name }} / {{ $labels.server_name }}."
+
+      - alert: InstanceLowDisk
+        expr: (node_filesystem_avail_bytes{job="node_exporter",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node_exporter",fstype!~"tmpfs|overlay"}) * 100 < 15
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk on {{ $labels.instance }}"
+          description: "Disk free is {{ $value | printf \"%.1f\" }}% on {{ $labels.mountpoint }}."
+
+  - name: websites
+    rules:
+      - alert: WebsiteDown
+        expr: probe_success{job="blackbox"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Website down: {{ $labels.instance }}"
+          description: "{{ $labels.service_name }} for {{ $labels.client_name }} has failed probe for 2 minutes."
+
+      - alert: SlowWebsite
+        expr: probe_duration_seconds{job="blackbox"} > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow response: {{ $labels.instance }}"
+          description: "{{ $labels.service_name }} response time is {{ $value | printf \"%.2f\" }}s."
+
+      - alert: SSLCertExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry{job="blackbox"} - time()) / 86400 < 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSL expiring: {{ $labels.instance }}"
+          description: "Certificate for {{ $labels.instance }} expires in {{ $value | printf \"%.0f\" }} days."
