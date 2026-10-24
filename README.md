@@ -149,10 +149,8 @@ data_volume_size      = 50
 domain_name           = "monitor-dev.example.com"
 backup_retention_days = 3
 config_bucket         = "demo-monitoring-config"
-github_org_repo       = "your-github-name/aws-monitoring-platform"
+github_org_repo       = "github-name/aws-monitoring-platform"
 ```
-
-> Do not commit `terraform.tfvars` to a public repository.
 
 ### Step 3 — Store Grafana Password in SSM
 
